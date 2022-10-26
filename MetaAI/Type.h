@@ -5,6 +5,7 @@
 #ifndef METAAI_TYPE_H
 #define METAAI_TYPE_H
 
+#include <iostream>
 #include <cstring>
 
 // 矩阵，可以看成基本类型
@@ -24,9 +25,19 @@ struct Matrix {
     template<typename Gen>
     static Matrix RandomlyCreate(Gen gen) {
         Matrix res;
-        for (int i = 0; i < N; i++) {
-            for (int j = 0; j < M; j++) {
+        for (std::size_t i = 0; i < N; i++) {
+            for (std::size_t j = 0; j < M; j++) {
                 res.data[i][j] = gen();
+            }
+        }
+        return res;
+    }
+
+    static Matrix AllOne() {
+        Matrix res;
+        for (std::size_t i = 0; i < N; i++){
+            for (std::size_t j = 0; j < M; j++) {
+                res.data[i][j] = 1;
             }
         }
         return res;
@@ -46,6 +57,7 @@ struct Matrix {
 
     void BackwardImpl() {}
 
+    // 矩阵相乘
     template<std::size_t R_N, std::size_t R_M>
     Matrix<N, R_M> operator*(const Matrix<R_N, R_M> &rhs) {
         Matrix<N, R_M> res;
@@ -59,6 +71,7 @@ struct Matrix {
         return res;
     }
 
+    // 矩阵相加
     Matrix operator+(const Matrix &rhs) {
         Matrix res;
         for (int i = 0; i < N; i++) {
@@ -69,6 +82,7 @@ struct Matrix {
         return res;
     }
 
+    // 取反
     Matrix operator-() {
         Matrix res = *this;
         for (int i = 0; i < N; i++) {
@@ -79,6 +93,7 @@ struct Matrix {
         return res;
     }
 
+    // 转置
     Matrix<M, N> T() {
         Matrix<M, N> res;
         for (int i = 0; i < N; i++) {

@@ -1,7 +1,7 @@
 //
 // Created by iku-iku-iku on 2022/10/21.
 //
-#include "Components.h"
+#include "MetaAI/Components.h"
 #include "Util.h"
 
 void test1() {

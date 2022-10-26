@@ -5,3 +5,6 @@ set(CMAKE_CXX_STANDARD 20)
 
 add_executable(MetaAI
         main.cpp)
+
+add_subdirectory(MetaAI)
+add_subdirectory(test)

@@ -6,7 +6,7 @@
 #define METAAI_TRAIN_H
 
 #include <tuple>
-#include "Components.h"
+#include "MetaAI/Components.h"
 
 struct LrScheduler {
     double lr;

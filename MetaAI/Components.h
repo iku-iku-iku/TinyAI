@@ -264,7 +264,6 @@ struct MatrixVariable : Operator<MatrixVariable<InN, InM>> {
 
     void set_value(const Mat &value) { data = value; }
 
-
 private:
     void ForwardImpl() {}
 
@@ -366,7 +365,7 @@ struct Power : Operator<Power<InOperand>> {
     operand_ref_t<Operand> operand;
     Whole whole;
 
-    Power(unsigned int k, const InOperand &o) : K(k), operand(const_cast<InOperand&>(o)) {}
+    Power(unsigned int k, const InOperand &o) : K(k), operand(const_cast<InOperand &>(o)) {}
 
 private:
     void ForwardImpl() {
@@ -509,6 +508,95 @@ private:
                 operand.whole.grad[i][j] = whole.gradient();
             }
         }
+
+        operand.Backward();
+    }
+};
+
+template<std::size_t InFilterSize, std::size_t InStride, MatrixLikeComponent InOperand>
+struct Conv2d : Operator<Conv2d<InFilterSize, InStride, InOperand>> {
+    friend struct Operator<Conv2d<InFilterSize, InStride, InOperand>>;
+
+    static constexpr std::size_t N = (InOperand::N - InFilterSize) / InStride + 1;
+    static constexpr std::size_t M = (InOperand::M - InFilterSize) / InStride + 1;
+    using Whole = MatrixVariable<N, M>;
+
+    MatrixVariable<InFilterSize, InFilterSize> filter;
+
+    Whole whole;
+
+    operand_ref_t<InOperand> operand;
+
+    static constexpr std::size_t FilterSize = InFilterSize;
+    static constexpr std::size_t Stride = InStride;
+
+    explicit Conv2d(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
+
+    Optimizable auto &parameters() { return filter; }
+
+    // 初始化filter
+    void initialize(const Matrix<InFilterSize, InFilterSize> &params) { filter.set_value(params); }
+
+private:
+    void ForwardImpl() {
+        operand.Forward();
+
+        for (std::size_t i = 0; i < N; i++) {
+            for (std::size_t j = 0; j < M; j++) {
+                whole.data[i][j] = 0;
+                for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
+                    for (std::size_t v = Stride * j, f_j = 0; f_j < FilterSize; f_j++) {
+                        whole.data[i][j] += filter.data[f_i][f_j] * operand.whole.data[u + f_i][v + f_j];
+                    }
+                }
+            }
+        }
+    }
+
+    void BackwardImpl() {
+        for (std::size_t i = 0; i < N; i++) {
+            for (std::size_t j = 0; j < M; j++) {
+                for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
+                    for (std::size_t v = Stride * j, f_j = 0; f_j < FilterSize; f_j++) {
+                        operand.whole.grad[u + f_i][v + f_j] += whole.grad[i][j] * filter.data[f_i][f_j];
+                        filter.grad[f_i][f_j] += whole.grad[i][j] * operand.whole.data[u + f_i][v + f_j];
+                    }
+                }
+            }
+        }
+
+        operand.Backward();
+    }
+};
+
+template<std::size_t InDim, std::size_t OutDim, MatrixLikeComponent InOperand>
+struct FullyConnected : Operator<FullyConnected<InDim, OutDim, InOperand>>{
+    friend struct Operator<FullyConnected<InDim, OutDim, InOperand>>;
+
+    static constexpr std::size_t N = OutDim;
+    static constexpr std::size_t M = 1;
+
+    using Whole = MatrixVariable<N, M>;
+    Whole whole;
+
+    MatrixVariable<OutDim, InDim> w;
+    MatrixVariable<OutDim, 1> b;
+
+    operand_ref_t<InOperand> operand;
+    explicit FullyConnected(const InOperand& o) : operand(const_cast<InOperand&>(o)) {}
+
+
+private:
+    void ForwardImpl() {
+        operand.Forward();
+
+        whole.data = w.data * operand.whole.data + b.data;
+    }
+
+    void BackwardImpl() {
+        w.grad = whole.grad * operand.whole.data.T();
+        operand.whole.grad = w.data.T() * whole.grad;
+        b.grad = whole.grad;
 
         operand.Backward();
     }
