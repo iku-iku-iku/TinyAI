@@ -58,25 +58,6 @@ concept Component = requires(T t) {
 template<typename T>
 concept MatrixLikeComponent = Component<T> && MatrixLike<T>;
 
-// CRTP，提供静态多态
-template<typename OpType>
-struct Operator {
-    void Forward() {
-        static_cast<OpType *>(this)->ForwardImpl();
-    }
-
-    void Backward() {
-        static_cast<OpType *>(this)->BackwardImpl();
-    }
-};
-
-
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
-struct MatMultiply;
-
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
-struct MatAddition;
-
 template<typename InDataType>
 struct Variable;
 
@@ -105,8 +86,7 @@ using operand_ref_t = typename z_operand_ref<InOperandType>::type;
 
 // 单独的变量
 template<typename InDataType>
-struct Variable : Operator<Variable<InDataType>> {
-    friend struct Operator<Variable<InDataType>>;
+struct Variable {
 
     using VariableClassFlag = std::nullptr_t;
 
@@ -143,15 +123,13 @@ struct Variable : Operator<Variable<InDataType>> {
         grad = DataType{};
     }
 
-private:
-    void ForwardImpl() {}
+    void Forward() {}
 
-    void BackwardImpl() {}
+    void Backward() {}
 };
 
 template<typename... Operands>
-struct VarMultiply : Operator<VarMultiply<Operands...>> {
-    friend struct Operator<VarMultiply<Operands...>>;
+struct VarMultiply {
 
     using Whole = Variable<double>;
 
@@ -161,34 +139,32 @@ struct VarMultiply : Operator<VarMultiply<Operands...>> {
 
     explicit VarMultiply(Operands &... operands) : operands_tuple(operands...) {}
 
-private:
     template<std::size_t... Is>
-    auto VarForwardImpl(std::index_sequence<Is...>) {
+    auto VarForward(std::index_sequence<Is...>) {
         (get<Is>(operands_tuple).Forward(), ...);
         return (get<Is>(operands_tuple).value() * ...);
     }
 
-    void ForwardImpl() {
-        whole.whole.data = VarForwardImpl(std::index_sequence_for<Operands...>{});
+    void Forward() {
+        whole.whole.data = VarForward(std::index_sequence_for<Operands...>{});
     }
 
     template<std::size_t... Is>
-    void VarBackwardImpl(std::index_sequence<Is...>) {
+    void VarBackward(std::index_sequence<Is...>) {
         auto product = (get<Is>(operands_tuple).value() * ...);
         ((get<Is>(operands_tuple).whole.grad = (whole.grad * product / get<Is>(operands_tuple).value())), ...);
 
         (get<Is>(operands_tuple).Backward(), ...);
     }
 
-    void BackwardImpl() {
-        VarBackwardImpl(std::index_sequence_for<Operands...>{});
+    void Backward() {
+        VarBackward(std::index_sequence_for<Operands...>{});
     }
 };
 
 // 多个变量求和
 template<typename... Operands>
-struct VarAddition : Operator<VarAddition<Operands...>> {
-    friend struct Operator<VarAddition<Operands...>>;
+struct VarAddition {
 
     using Whole = Variable<double>;
 
@@ -198,26 +174,25 @@ struct VarAddition : Operator<VarAddition<Operands...>> {
 
     explicit VarAddition(const Operands &... operands) : operands_tuple(const_cast<Operands &>(operands)...) {}
 
-private:
     template<std::size_t... Is>
-    auto VarForwardImpl(std::index_sequence<Is...>) {
+    auto VarForward(std::index_sequence<Is...>) {
         (get<Is>(operands_tuple).Forward(), ...);
         return (get<Is>(operands_tuple).whole.data + ...);
     }
 
-    void ForwardImpl() {
-        whole.data = VarForwardImpl(std::index_sequence_for<Operands...>{});
+    void Forward() {
+        whole.data = VarForward(std::index_sequence_for<Operands...>{});
     }
 
     template<std::size_t... Is>
-    void VarBackwardImpl(std::index_sequence<Is...>) {
+    void VarBackward(std::index_sequence<Is...>) {
         ((get<Is>(operands_tuple).whole.grad = whole.grad), ...);
 
         (get<Is>(operands_tuple).Backward(), ...);
     }
 
-    void BackwardImpl() {
-        VarBackwardImpl(std::index_sequence_for<Operands...>{});
+    void Backward() {
+        VarBackward(std::index_sequence_for<Operands...>{});
     }
 };
 
@@ -228,8 +203,7 @@ using Vector = Matrix<N, 1, InDataType>;
 
 // 矩阵变量
 template<std::size_t InN, std::size_t InM>
-struct MatrixVariable : Operator<MatrixVariable<InN, InM>> {
-    friend struct Operator<MatrixVariable<InN, InM>>;
+struct MatrixVariable {
 
     using MatrixVariableClassFlag = std::nullptr_t;
 
@@ -264,16 +238,64 @@ struct MatrixVariable : Operator<MatrixVariable<InN, InM>> {
 
     void set_value(const Mat &value) { data = value; }
 
-private:
-    void ForwardImpl() {}
+    void Forward() {}
 
-    void BackwardImpl() {}
+    void Backward() {}
 };
 
-// 矩阵相乘
+template<typename InOperand1, typename InOperand2>
+struct TwoOperandPolicy {
+    using Operand1 = InOperand1;
+    using Operand2 = InOperand2;
+};
+
 template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
-struct MatMultiply : Operator<MatMultiply<InOperand1, InOperand2>> {
-    friend struct Operator<MatMultiply<InOperand1, InOperand2>>;
+struct MatMultiplyPolicy : TwoOperandPolicy<InOperand1, InOperand2> {
+    static constexpr std::size_t N = InOperand1::N;
+    static constexpr std::size_t M = InOperand2::M;
+
+    void Forward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
+        operand1.Forward();
+        operand2.Forward();
+        whole.set_value(operand1.whole.data * operand2.whole.data);
+    }
+
+    void Backward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
+        // (N, K) * (K, M) => (N, M)
+        // (N, M) * (M, K) => (N, K)
+        // (K, N) * (N, M) => (K, M)
+
+        operand1.whole.grad = whole.grad * operand2.whole.data.T();
+        operand2.whole.grad = operand1.whole.data.T() * whole.grad;
+
+        operand1.Backward();
+        operand2.Backward();
+    }
+};
+
+template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
+struct MatAdditionPolicy : TwoOperandPolicy<InOperand1, InOperand2> {
+    static constexpr std::size_t N = InOperand1::N;
+    static constexpr std::size_t M = InOperand1::M;
+
+    void Forward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
+        operand1.Forward();
+        operand2.Forward();
+
+        whole.data = operand1.whole.data + operand2.whole.data;
+    }
+
+    void Backward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
+        operand1.whole.grad = whole.grad;
+        operand2.whole.grad = whole.grad;
+
+        operand1.Backward();
+        operand2.Backward();
+    }
+};
+
+template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2, template<class, class> class Policy>
+struct MatBinaryOperator {
 
     using Operand1 = InOperand1;
     using Operand2 = InOperand2;
@@ -288,71 +310,33 @@ struct MatMultiply : Operator<MatMultiply<InOperand1, InOperand2>> {
     operand_ref_t<Operand1> operand1; // N * K
     operand_ref_t<Operand2> operand2; // K * M
 
-    MatMultiply(const InOperand1 &o1, const InOperand2 &o2) : operand1(const_cast<InOperand1 &>(o1)),
+    Policy<InOperand1, InOperand2> policy;
+
+    MatBinaryOperator(const InOperand1 &o1, const InOperand2 &o2) : operand1(const_cast<InOperand1 &>(o1)),
                                                               operand2(const_cast<InOperand2 &>(o2)) {}
 
-private:
-    void ForwardImpl() {
-        operand1.Forward();
-        operand2.Forward();
-        whole.set_value(operand1.whole.data * operand2.whole.data);
+    void Forward() {
+        policy.Forward(operand1, operand2, whole);
     }
 
-    void BackwardImpl() {
-        // (N, K) * (K, M) => (N, M)
-        // (N, M) * (M, K) => (N, K)
-        // (K, N) * (N, M) => (K, M)
 
-        operand1.whole.grad = whole.grad * operand2.whole.data.T();
-        operand2.whole.grad = operand1.whole.data.T() * whole.grad;
-
-        operand1.Backward();
-        operand2.Backward();
+    void Backward() {
+        policy.Backward(operand1, operand2, whole);
     }
 };
 
-// 矩阵求和
+// 矩阵相乘
 template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
-struct MatAddition : Operator<MatAddition<InOperand1, InOperand2>> {
-    friend struct Operator<MatAddition<InOperand1, InOperand2>>;
+using MatMultiply = MatBinaryOperator<InOperand1, InOperand2, MatMultiplyPolicy>;
 
-    using Operand1 = InOperand1;
-    using Operand2 = InOperand2;
+// 矩阵相加
+template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
+using MatAddition = MatBinaryOperator<InOperand1, InOperand2, MatAdditionPolicy>;
 
-    using Whole = MatrixVariable<InOperand1::N, InOperand2::M>;
-
-    static constexpr std::size_t N = InOperand1::N;
-    static constexpr std::size_t M = InOperand2::M;
-
-    Whole whole;
-
-    operand_ref_t<Operand1> operand1; // N * M
-    operand_ref_t<Operand2> operand2; // N * M
-
-    MatAddition(const Operand1 &o1, const Operand2 &o2) : operand1(const_cast<Operand1 &>(o1)),
-                                                          operand2(const_cast<Operand2 &>(o2)) {}
-
-private:
-    void ForwardImpl() {
-        operand1.Forward();
-        operand2.Forward();
-
-        whole.data = operand1.whole.data + operand2.whole.data;
-    }
-
-    void BackwardImpl() {
-        operand1.whole.grad = whole.grad;
-        operand2.whole.grad = whole.grad;
-
-        operand1.Backward();
-        operand2.Backward();
-    }
-};
 
 // 对矩阵的每一维求指数运算
 template<MatrixLikeComponent InOperand>
-struct Power : Operator<Power<InOperand>> {
-    friend struct Operator<Power<InOperand>>;
+struct Power {
 
     using Operand = InOperand;
 
@@ -367,8 +351,7 @@ struct Power : Operator<Power<InOperand>> {
 
     Power(unsigned int k, const InOperand &o) : K(k), operand(const_cast<InOperand &>(o)) {}
 
-private:
-    void ForwardImpl() {
+    void Forward() {
         operand.Forward();
 
         auto &val = operand.whole.data;
@@ -379,7 +362,7 @@ private:
         }
     }
 
-    void BackwardImpl() {
+    void Backward() {
         auto &val = operand.whole.data;
 
         for (int i = 0; i < N; i++) {
@@ -394,8 +377,7 @@ private:
 
 // 对矩阵的每个元素进行映射 f(x) = 1 / (1 + exp(-x))
 template<MatrixLikeComponent InOperand>
-struct Sigmoid : Operator<Sigmoid<InOperand>> {
-    friend struct Operator<Sigmoid<InOperand>>;
+struct Sigmoid {
 
     using Operand = InOperand;
 
@@ -410,8 +392,7 @@ struct Sigmoid : Operator<Sigmoid<InOperand>> {
 
     Matrix<Operand::N, Operand::M> &value() { return whole.data; }
 
-private:
-    void ForwardImpl() {
+    void Forward() {
         operand.Forward();
 
         auto &val = operand.whole.data;
@@ -423,7 +404,7 @@ private:
         }
     }
 
-    void BackwardImpl() {
+    void Backward() {
         for (int i = 0; i < N; i++) {
             for (int j = 0; j < M; j++) {
                 operand.whole.grad[i][j] = whole.grad[i][j] * (1 - whole.data[i][j]) * whole.data[i][j];
@@ -436,8 +417,7 @@ private:
 
 // 矩阵乘标量（标量不可优化）
 template<MatrixLikeComponent InOperand, typename ScalarType>
-struct MatScale : Operator<MatScale<InOperand, ScalarType>> {
-    friend struct Operator<MatScale<InOperand, ScalarType>>;
+struct MatScale {
     SINGLE_OPERAND_MATRIX_NM
 
     using Operand = InOperand;
@@ -451,8 +431,7 @@ struct MatScale : Operator<MatScale<InOperand, ScalarType>> {
 
     MatScale(const Operand &o, ScalarType scalar_) : operand(const_cast<InOperand &>(o)), scalar(scalar_) {}
 
-private:
-    void ForwardImpl() {
+    void Forward() {
         operand.Forward();
 
         for (int i = 0; i < N; ++i) {
@@ -462,7 +441,7 @@ private:
         }
     }
 
-    void BackwardImpl() {
+    void Backward() {
         for (int i = 0; i < N; ++i) {
             for (int j = 0; j < M; ++j) {
                 operand.whole.grad[i][j] = scalar * whole.grad[i][j];
@@ -475,8 +454,7 @@ private:
 
 // 将矩阵的所有元素加起来
 template<MatrixLikeComponent InOperand>
-struct Sum : Operator<Sum<InOperand>> {
-    friend struct Operator<Sum<InOperand>>;
+struct Sum {
 
     using Operand = InOperand;
 
@@ -488,8 +466,7 @@ struct Sum : Operator<Sum<InOperand>> {
 
     explicit Sum(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
 
-private:
-    void ForwardImpl() {
+    void Forward() {
         operand.Forward();
 
         whole.whole.data = 0;
@@ -502,7 +479,7 @@ private:
         }
     }
 
-    void BackwardImpl() {
+    void Backward() {
         for (int i = 0; i < InOperand::N; i++) {
             for (int j = 0; j < InOperand::M; j++) {
                 operand.whole.grad[i][j] = whole.gradient();
@@ -514,8 +491,7 @@ private:
 };
 
 template<std::size_t InFilterSize, std::size_t InStride, MatrixLikeComponent InOperand>
-struct Conv2d : Operator<Conv2d<InFilterSize, InStride, InOperand>> {
-    friend struct Operator<Conv2d<InFilterSize, InStride, InOperand>>;
+struct Conv2d {
 
     static constexpr std::size_t N = (InOperand::N - InFilterSize) / InStride + 1;
     static constexpr std::size_t M = (InOperand::M - InFilterSize) / InStride + 1;
@@ -537,8 +513,7 @@ struct Conv2d : Operator<Conv2d<InFilterSize, InStride, InOperand>> {
     // 初始化filter
     void initialize(const Matrix<InFilterSize, InFilterSize> &params) { filter.set_value(params); }
 
-private:
-    void ForwardImpl() {
+    void Forward() {
         operand.Forward();
 
         for (std::size_t i = 0; i < N; i++) {
@@ -553,7 +528,7 @@ private:
         }
     }
 
-    void BackwardImpl() {
+    void Backward() {
         for (std::size_t i = 0; i < N; i++) {
             for (std::size_t j = 0; j < M; j++) {
                 for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
@@ -570,8 +545,7 @@ private:
 };
 
 template<std::size_t InDim, std::size_t OutDim, MatrixLikeComponent InOperand>
-struct FullyConnected : Operator<FullyConnected<InDim, OutDim, InOperand>>{
-    friend struct Operator<FullyConnected<InDim, OutDim, InOperand>>;
+struct FullyConnected {
 
     static constexpr std::size_t N = OutDim;
     static constexpr std::size_t M = 1;
@@ -583,17 +557,17 @@ struct FullyConnected : Operator<FullyConnected<InDim, OutDim, InOperand>>{
     MatrixVariable<OutDim, 1> b;
 
     operand_ref_t<InOperand> operand;
-    explicit FullyConnected(const InOperand& o) : operand(const_cast<InOperand&>(o)) {}
+
+    explicit FullyConnected(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
 
 
-private:
-    void ForwardImpl() {
+    void Forward() {
         operand.Forward();
 
         whole.data = w.data * operand.whole.data + b.data;
     }
 
-    void BackwardImpl() {
+    void Backward() {
         w.grad = whole.grad * operand.whole.data.T();
         operand.whole.grad = w.data.T() * whole.grad;
         b.grad = whole.grad;
@@ -608,9 +582,12 @@ inline void step(double lr, T &... variables) {
     (variables.clear_grad(), ...);
 }
 
+template<typename T>
+using pure_t = std::remove_cvref_t<T>;
+
 template<MatrixLikeComponent LHS, MatrixLikeComponent RHS>
 inline auto operator*(const LHS &lhs, const RHS &rhs) {
-    return MatMultiply{lhs, rhs};
+    return MatMultiply<pure_t<decltype(lhs)>, pure_t<decltype(rhs)>>{lhs, rhs};
 }
 
 template<Scalar ScalarType, MatrixLikeComponent RHS>
@@ -627,7 +604,7 @@ template<MatrixLikeComponent LHS, MatrixLikeComponent RHS>
 requires (IsMatrixVariable<LHS> || IsMatrixVariable<typename LHS::Whole>) &&
          (IsMatrixVariable<RHS> || IsMatrixVariable<typename RHS::Whole>)
 inline auto operator+(const LHS &lhs, const RHS &rhs) {
-    return MatAddition{lhs, rhs};
+    return MatAddition<pure_t<decltype(lhs)>, pure_t<decltype(rhs)>>{lhs, rhs};
 }
 
 template<Component LHS, Component RHS>
