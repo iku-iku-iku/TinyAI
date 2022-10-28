@@ -4,7 +4,7 @@ add_subdirectory(lib)
 
 include_directories(lib/googletest lib/googletest/include ../MetaAI)
 
-file(GLOB_RECURSE tests ./*.cpp)
+file(GLOB_RECURSE tests test/*.cpp)
 
 add_executable(TEST ${tests})
 

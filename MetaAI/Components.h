@@ -5,61 +5,16 @@
 #ifndef METAAI_COMPONENTS_H
 #define METAAI_COMPONENTS_H
 
+#include <functional>
+#include "policies.h"
 #include <iostream>
 #include "Type.h"
 #include <tuple>
 #include <cstring>
 #include <cmath>
 
-// 定义单操作数的MatrixLikeComponent的N和M
-#define SINGLE_OPERAND_MATRIX_NM  \
-static constexpr std::size_t N = InOperand::N; \
-static constexpr std::size_t M = InOperand::M; \
-//
-
-// 标量
-template<typename T>
-concept Scalar = std::is_scalar_v<T>;
-
-// MatrixVariable和Matrix都是MatrixLike
-// 输出为矩阵的component也可以看成MatrixLike
-template<typename T>
-concept MatrixLike = requires { T::N; T::M; };
-
-// 可优化的类型
-template<typename T>
-concept Optimizable = requires(T t) {
-    &T::step;
-    &T::clear_grad;
-};
-
-// 单独的变量
-template<typename T>
-concept IsSingleVariable = requires{ typename T::VariableClassFlag; };
-
-// 矩阵变量
-template<typename T>
-concept IsMatrixVariable = requires{ typename T::MatrixVariableClassFlag; };
-
-// 变量
-template<typename T>
-concept IsVariable = IsMatrixVariable<T> || IsSingleVariable<T>;
-
-// 利用Component来构建一棵树
-// 将Variable看成一种trivial的component，并且Variable在叶子节点
-template<typename T>
-concept Component = requires(T t) {
-    &T::Backward;
-    &T::Forward;
-    t.whole.data; // 如果是Variable，则为可优化的参数，如果是component，则为中间结果
-    t.whole.grad; // 梯度，反向传播时根据component的求导结果和component的输出来计算得出（链式法则）
-};
-
-template<typename T>
-concept MatrixLikeComponent = Component<T> && MatrixLike<T>;
-
 template<typename InDataType>
-struct Variable;
+struct SingleVariable;
 
 template<std::size_t InN, std::size_t InM>
 struct MatrixVariable;
@@ -71,8 +26,8 @@ struct z_operand_ref {
 
 // 目前是完全在栈上运算，效率更高，因此需要对于栈上的Variable需要引用
 template<typename InDataType>
-struct z_operand_ref<Variable<InDataType>> {
-    using type = std::remove_reference_t<Variable<InDataType>> &;
+struct z_operand_ref<SingleVariable<InDataType>> {
+    using type = std::remove_reference_t<SingleVariable<InDataType>> &;
 };
 
 template<std::size_t InN, std::size_t InM>
@@ -83,10 +38,22 @@ struct z_operand_ref<MatrixVariable<InN, InM>> {
 template<typename InOperandType>
 using operand_ref_t = typename z_operand_ref<InOperandType>::type;
 
+template<typename T>
+struct z_data_type_of {
+};
+
+template<typename T>
+using data_type_of_t = typename z_data_type_of<T>::type;
+
+struct Variable {
+    virtual void step(double lr) = 0;
+
+    virtual void clear_grad() = 0;
+};
 
 // 单独的变量
 template<typename InDataType>
-struct Variable {
+struct SingleVariable : Variable {
 
     using VariableClassFlag = std::nullptr_t;
 
@@ -95,13 +62,13 @@ struct Variable {
     DataType data{};
     DataType grad{1}; // 对自己的梯度为1
 
-    Variable &whole;
+    SingleVariable &whole;
 
-    Variable() : whole(*this) {}
+    SingleVariable() : whole(*this) {}
 
-    explicit Variable(DataType x) : data(x), whole(*this) {}
+    explicit SingleVariable(DataType x) : data(x), whole(*this) {}
 
-    friend auto &operator<<(std::ostream &out, const Variable &var) {
+    friend auto &operator<<(std::ostream &out, const SingleVariable &var) {
         return out << var.data;
     }
 
@@ -114,12 +81,12 @@ struct Variable {
 //    Variable &operator=(const Variable &) = delete;
 
     // 利用梯度更新参数
-    void step(double lr) {
+    void step(double lr) override {
         data += -lr * grad;
     }
 
     // 清除梯度
-    void clear_grad() {
+    void clear_grad() override {
         grad = DataType{};
     }
 
@@ -128,10 +95,15 @@ struct Variable {
     void Backward() {}
 };
 
+template<typename T>
+struct z_data_type_of<SingleVariable<T>> {
+    using type = typename SingleVariable<T>::DataType;
+};
+
 template<typename... Operands>
 struct VarMultiply {
 
-    using Whole = Variable<double>;
+    using Whole = SingleVariable<double>;
 
     std::tuple<Operands &...> operands_tuple;
 
@@ -166,7 +138,7 @@ struct VarMultiply {
 template<typename... Operands>
 struct VarAddition {
 
-    using Whole = Variable<double>;
+    using Whole = SingleVariable<double>;
 
     std::tuple<operand_ref_t<Operands>...> operands_tuple;
 
@@ -196,14 +168,13 @@ struct VarAddition {
     }
 };
 
-
 // 向量看成列数为1的矩阵
 template<std::size_t N, typename InDataType = double>
 using Vector = Matrix<N, 1, InDataType>;
 
 // 矩阵变量
 template<std::size_t InN, std::size_t InM>
-struct MatrixVariable {
+struct MatrixVariable : Variable {
 
     using MatrixVariableClassFlag = std::nullptr_t;
 
@@ -216,11 +187,11 @@ struct MatrixVariable {
 
     MatrixVariable &whole;
 
-    void step(double lr) {
+    void step(double lr) override {
         data += -lr * grad;
     }
 
-    void clear_grad() {
+    void clear_grad() override {
         grad = Mat{};
     }
 
@@ -243,77 +214,32 @@ struct MatrixVariable {
     void Backward() {}
 };
 
-template<typename InOperand1, typename InOperand2>
-struct TwoOperandPolicy {
-    using Operand1 = InOperand1;
-    using Operand2 = InOperand2;
+template<std::size_t N, std::size_t M>
+struct z_data_type_of<MatrixVariable<N, M>> {
+    using type = typename MatrixVariable<N, M>::Mat;
 };
 
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
-struct MatMultiplyPolicy : TwoOperandPolicy<InOperand1, InOperand2> {
-    static constexpr std::size_t N = InOperand1::N;
-    static constexpr std::size_t M = InOperand2::M;
-
-    void Forward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
-        operand1.Forward();
-        operand2.Forward();
-        whole.set_value(operand1.whole.data * operand2.whole.data);
-    }
-
-    void Backward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
-        // (N, K) * (K, M) => (N, M)
-        // (N, M) * (M, K) => (N, K)
-        // (K, N) * (N, M) => (K, M)
-
-        operand1.whole.grad = whole.grad * operand2.whole.data.T();
-        operand2.whole.grad = operand1.whole.data.T() * whole.grad;
-
-        operand1.Backward();
-        operand2.Backward();
-    }
-};
-
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
-struct MatAdditionPolicy : TwoOperandPolicy<InOperand1, InOperand2> {
-    static constexpr std::size_t N = InOperand1::N;
-    static constexpr std::size_t M = InOperand1::M;
-
-    void Forward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
-        operand1.Forward();
-        operand2.Forward();
-
-        whole.data = operand1.whole.data + operand2.whole.data;
-    }
-
-    void Backward(InOperand1& operand1, InOperand2& operand2, auto& whole) {
-        operand1.whole.grad = whole.grad;
-        operand2.whole.grad = whole.grad;
-
-        operand1.Backward();
-        operand2.Backward();
-    }
-};
-
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2, template<class, class> class Policy>
+template<C_MatrixLikeComponent InOperand1, C_MatrixLikeComponent InOperand2, template<class, class> class Policy>
 struct MatBinaryOperator {
 
     using Operand1 = InOperand1;
     using Operand2 = InOperand2;
 
     using Whole = MatrixVariable<InOperand1::N, InOperand2::M>;
+    using PolicyType = Policy<InOperand1, InOperand2>;
 
-    static constexpr std::size_t N = InOperand1::N;
-    static constexpr std::size_t M = InOperand2::M;
+    static constexpr std::size_t N = PolicyType::N;
+    static constexpr std::size_t M = PolicyType::M;
 
     Whole whole;
 
     operand_ref_t<Operand1> operand1; // N * K
     operand_ref_t<Operand2> operand2; // K * M
 
-    Policy<InOperand1, InOperand2> policy;
+    PolicyType policy;
 
     MatBinaryOperator(const InOperand1 &o1, const InOperand2 &o2) : operand1(const_cast<InOperand1 &>(o1)),
-                                                              operand2(const_cast<InOperand2 &>(o2)) {}
+                                                                    operand2(const_cast<InOperand2 &>(o2)) {}
 
     void Forward() {
         policy.Forward(operand1, operand2, whole);
@@ -326,139 +252,58 @@ struct MatBinaryOperator {
 };
 
 // 矩阵相乘
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
+template<C_MatrixLikeComponent InOperand1, C_MatrixLikeComponent InOperand2>
 using MatMultiply = MatBinaryOperator<InOperand1, InOperand2, MatMultiplyPolicy>;
 
 // 矩阵相加
-template<MatrixLikeComponent InOperand1, MatrixLikeComponent InOperand2>
+template<C_MatrixLikeComponent InOperand1, C_MatrixLikeComponent InOperand2>
 using MatAddition = MatBinaryOperator<InOperand1, InOperand2, MatAdditionPolicy>;
 
-
-// 对矩阵的每一维求指数运算
-template<MatrixLikeComponent InOperand>
-struct Power {
+template<C_MatrixLikeComponent InOperand, template<class> class InPolicy>
+struct ElementwiseOperator {
 
     using Operand = InOperand;
 
-    SINGLE_OPERAND_MATRIX_NM
+    static constexpr std::size_t N = InOperand::N;
+    static constexpr std::size_t M = InOperand::M;
 
     using Whole = MatrixVariable<N, M>;
-
-    const unsigned int K; //  求K次方
+    using Policy = InPolicy<InOperand>;
 
     operand_ref_t<Operand> operand;
     Whole whole;
+    Policy policy;
 
-    Power(unsigned int k, const InOperand &o) : K(k), operand(const_cast<InOperand &>(o)) {}
+    explicit ElementwiseOperator(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
 
     void Forward() {
-        operand.Forward();
-
-        auto &val = operand.whole.data;
-        for (int i = 0; i < N; i++) {
-            for (int j = 0; j < M; j++) {
-                whole.data[i][j] = std::pow(val[i][j], K);
-            }
-        }
+        policy.Forward(operand, whole);
     }
 
     void Backward() {
-        auto &val = operand.whole.data;
-
-        for (int i = 0; i < N; i++) {
-            for (int j = 0; j < M; j++) {
-                operand.whole.grad[i][j] = whole.grad[i][j] * K * std::pow(val[i][j], K - 1);
-            }
-        }
-
-        operand.Backward();
+        policy.Backward(operand, whole);
     }
 };
+
+// 对矩阵的每个元素进行映射 f(x) = x ^ k
+template<C_MatrixLikeComponent InOperand>
+using Power = ElementwiseOperator<InOperand, PowerPolicy>;
 
 // 对矩阵的每个元素进行映射 f(x) = 1 / (1 + exp(-x))
-template<MatrixLikeComponent InOperand>
-struct Sigmoid {
-
-    using Operand = InOperand;
-
-    SINGLE_OPERAND_MATRIX_NM
-
-    using Whole = MatrixVariable<N, M>;
-
-    operand_ref_t<Operand> operand;
-    Whole whole;
-
-    explicit Sigmoid(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
-
-    Matrix<Operand::N, Operand::M> &value() { return whole.data; }
-
-    void Forward() {
-        operand.Forward();
-
-        auto &val = operand.whole.data;
-        for (int i = 0; i < N; i++) {
-            for (int j = 0; j < M; j++) {
-                auto &x = val.data[i][j];
-                whole.data[i][j] = 1 / (1 + std::exp(-x));
-            }
-        }
-    }
-
-    void Backward() {
-        for (int i = 0; i < N; i++) {
-            for (int j = 0; j < M; j++) {
-                operand.whole.grad[i][j] = whole.grad[i][j] * (1 - whole.data[i][j]) * whole.data[i][j];
-            }
-        }
-
-        operand.Backward();
-    }
-};
+template<C_MatrixLikeComponent InOperand>
+using Sigmoid = ElementwiseOperator<InOperand, SigmoidPolicy>;
 
 // 矩阵乘标量（标量不可优化）
-template<MatrixLikeComponent InOperand, typename ScalarType>
-struct MatScale {
-    SINGLE_OPERAND_MATRIX_NM
-
-    using Operand = InOperand;
-    using Whole = MatrixVariable<InOperand::N, InOperand::M>;
-
-
-    Whole whole;
-
-    operand_ref_t<InOperand> operand;
-    ScalarType scalar;
-
-    MatScale(const Operand &o, ScalarType scalar_) : operand(const_cast<InOperand &>(o)), scalar(scalar_) {}
-
-    void Forward() {
-        operand.Forward();
-
-        for (int i = 0; i < N; ++i) {
-            for (int j = 0; j < M; ++j) {
-                whole.data[i][j] = scalar * operand.whole.data[i][j];
-            }
-        }
-    }
-
-    void Backward() {
-        for (int i = 0; i < N; ++i) {
-            for (int j = 0; j < M; ++j) {
-                operand.whole.grad[i][j] = scalar * whole.grad[i][j];
-            }
-        }
-
-        operand.Backward();
-    }
-};
+template<C_MatrixLikeComponent InOperand>
+using MatScale = ElementwiseOperator<InOperand, ScalePolicy>;
 
 // 将矩阵的所有元素加起来
-template<MatrixLikeComponent InOperand>
+template<C_MatrixLikeComponent InOperand>
 struct Sum {
 
     using Operand = InOperand;
 
-    using Whole = Variable<double>;
+    using Whole = SingleVariable<double>;
 
     Whole whole;
 
@@ -490,93 +335,268 @@ struct Sum {
     }
 };
 
-template<std::size_t InFilterSize, std::size_t InStride, MatrixLikeComponent InOperand>
-struct Conv2d {
+// 将一系列层组成一个复合函数，整体可以看成一个Component，能够与其他Component进行组合
+template<std::size_t InN, std::size_t InM, typename... Layer>
+struct Sequence {
 
-    static constexpr std::size_t N = (InOperand::N - InFilterSize) / InStride + 1;
-    static constexpr std::size_t M = (InOperand::M - InFilterSize) / InStride + 1;
-    using Whole = MatrixVariable<N, M>;
+    std::tuple<Layer...> layers{};
 
-    MatrixVariable<InFilterSize, InFilterSize> filter;
+    static constexpr std::size_t N = InN;
+    static constexpr std::size_t M = InM;
+
+    // 使得loss可以通过sequence进行Backward
+    struct Whole : MatrixVariable<N, M>{
+        Sequence& seq;
+        Whole(Sequence& seq_) : seq(seq_) {}
+
+        void Backward() {
+            seq.Backward();
+        }
+    };
 
     Whole whole;
 
-    operand_ref_t<InOperand> operand;
+    Sequence() : whole(*this) {}
 
-    static constexpr std::size_t FilterSize = InFilterSize;
-    static constexpr std::size_t Stride = InStride;
+    // 将sequence看作复合函数，并且返回封装后的whole，可以看作一个component，参与构建
+    auto &operator()(const auto &input) {
+        Forward(input);
+        return whole;
+    }
 
-    explicit Conv2d(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
+    // 将input逐层传递
+    void Forward(const auto &input) {
+        whole.data = ForwardHelper<0, sizeof...(Layer)>::Forward(input, layers);
+    }
 
-    Optimizable auto &parameters() { return filter; }
+    template<std::size_t I, std::size_t MAX>
+    struct ForwardHelper {
+        static auto Forward(const auto &input, auto &layers) {
+            if constexpr (I == MAX) { return input; }
+            else { return ForwardHelper<I + 1, MAX>::Forward(get<I>(layers).Forward(input), layers); }
+        }
+    };
 
-    // 初始化filter
-    void initialize(const Matrix<InFilterSize, InFilterSize> &params) { filter.set_value(params); }
+    // 将梯度逐层反向传回
+    void Backward() {
+        BackwardHelper<sizeof...(Layer) - 1>::Backward(whole.grad, layers);
+    }
 
-    void Forward() {
-        operand.Forward();
+    template<std::size_t I>
+    struct BackwardHelper {
+        static auto Backward(const auto &grad, auto &layers) {
+            if constexpr (I == 0) { return get<I>(layers).Backward(grad); }
+            else { return BackwardHelper<I - 1>::Backward(get<I>(layers).Backward(grad), layers); }
+        }
+    };
 
-        for (std::size_t i = 0; i < N; i++) {
-            for (std::size_t j = 0; j < M; j++) {
-                whole.data[i][j] = 0;
-                for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
-                    for (std::size_t v = Stride * j, f_j = 0; f_j < FilterSize; f_j++) {
-                        whole.data[i][j] += filter.data[f_i][f_j] * operand.whole.data[u + f_i][v + f_j];
-                    }
-                }
-            }
+    template<typename... Elem1, typename... Elem2>
+    inline auto compose(const std::tuple<Elem1 &...> &t1, const std::tuple<Elem2 &...> &t2) {
+        return std::tuple_cat(t1, t2);
+    }
+
+    template<std::size_t I, std::size_t MAX, typename... Elem>
+    auto parameters(const std::tuple<Elem &...> &t) {
+        if constexpr (I == MAX) { return t; }
+        else if constexpr (C_ParameterLayer<decltype(get<I>(layers))>) {
+            return parameters<I + 1, MAX>(compose(t, get<I>(layers).parameters()));
+        } else {
+            return parameters<I + 1, MAX>(t);
         }
     }
 
-    void Backward() {
-        for (std::size_t i = 0; i < N; i++) {
-            for (std::size_t j = 0; j < M; j++) {
-                for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
-                    for (std::size_t v = Stride * j, f_j = 0; f_j < FilterSize; f_j++) {
-                        operand.whole.grad[u + f_i][v + f_j] += whole.grad[i][j] * filter.data[f_i][f_j];
-                        filter.grad[f_i][f_j] += whole.grad[i][j] * operand.whole.data[u + f_i][v + f_j];
-                    }
-                }
-            }
-        }
-
-        operand.Backward();
+    auto parameters() {
+        return parameters<0, sizeof...(Layer)>(std::make_tuple());
     }
 };
 
-template<std::size_t InDim, std::size_t OutDim, MatrixLikeComponent InOperand>
-struct FullyConnected {
+struct TrivialPassLayer {
+    auto Forward(const auto &input) {
+        return input;
+    }
 
+    auto Backward(const auto &grad) {
+        return grad;
+    }
+};
+
+template<std::size_t N>
+struct ScaleLayer {
+    auto Forward(const auto &input) {
+        return input * N;
+    }
+
+    auto Backward(const auto &grad) {
+        return N * grad;
+    }
+};
+
+template<std::size_t N, std::size_t M>
+struct SumLayer {
+    auto Forward(const Matrix<N, M> &input) {
+        typename Matrix<N, M>::DataType out{};
+
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = 0; j < M; ++j) {
+                out += input.get(i, j);
+            }
+        }
+
+        return out;
+    }
+
+    auto Backward(const typename Matrix<N, M>::DataType &grad) {
+        Matrix<N, M> res;
+
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = 0; j < M; ++j) {
+                res.get(i, j) = grad;
+            }
+        }
+
+        return res;
+    }
+};
+
+template<std::size_t N, std::size_t M, std::size_t K>
+struct PowerLayer {
+    Matrix<N, M> cached_input;
+
+    auto Forward(const Matrix<N, M> &input) {
+        cached_input = input;
+        Matrix<N, M> out;
+
+        auto &val = input.data;
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = 0; j < M; ++j) {
+                out.get(i, j) = std::pow(input.get(i, j), K);
+            }
+        }
+
+        return out;
+    }
+
+    auto Backward(const Matrix<N, M> &grad) {
+        Matrix<N, M> res;
+
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = 0; j < M; ++j) {
+                res.get(i, j) = grad.get(i, j) * K * std::pow(cached_input.get(i, j), K - 1);
+            }
+        }
+
+        return res;
+    }
+};
+
+template<std::size_t N, std::size_t M>
+struct SigmoidLayer {
+    Matrix<N, M> cached_out;
+
+    auto Forward(const Matrix<N, M> &input) {
+        Matrix<N, M> out;
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = 0; j < M; ++j) {
+                auto &x = input.get(i, j);
+                out.get(i, j) = 1 / (1 + std::exp(-x));
+            }
+        }
+        cached_out = out;
+        return out;
+    }
+
+    auto Backward(const Matrix<N, M> &grad) {
+        Matrix<N, M> res;
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = 0; j < M; ++j) {
+                res.get(i, j) = grad.get(i, j) * (1 - cached_out.get(i, j)) * cached_out.get(i, j);
+            }
+        }
+        return res;
+    }
+};
+
+template<std::size_t InDim, std::size_t OutDim, typename Initializer>
+struct FullyConnectedLayer {
     static constexpr std::size_t N = OutDim;
     static constexpr std::size_t M = 1;
-
-    using Whole = MatrixVariable<N, M>;
-    Whole whole;
 
     MatrixVariable<OutDim, InDim> w;
     MatrixVariable<OutDim, 1> b;
 
-    operand_ref_t<InOperand> operand;
+    using Input = Matrix<InDim, 1>;
+    Input cached_input;
 
-    explicit FullyConnected(const InOperand &o) : operand(const_cast<InOperand &>(o)) {}
+    FullyConnectedLayer() : w(Matrix<OutDim, InDim>::template CreateWith<Initializer>()),
+                            b(Matrix<OutDim, 1>::template CreateWith<Initializer>()) {}
 
-
-    void Forward() {
-        operand.Forward();
-
-        whole.data = w.data * operand.whole.data + b.data;
+    auto Forward(const Input &input) {
+        cached_input = input;
+        return w.data * input + b.data;
     }
 
-    void Backward() {
-        w.grad = whole.grad * operand.whole.data.T();
-        operand.whole.grad = w.data.T() * whole.grad;
-        b.grad = whole.grad;
+    auto Backward(const auto &grad) {
+        w.grad = grad.matmul(cached_input.T());
+        b.grad = grad;
+        return w.data.T() * grad;
+    }
 
-        operand.Backward();
+    auto parameters() {
+        return std::make_tuple(std::ref(w), std::ref(b));
     }
 };
 
-template<Optimizable... T>
+template<std::size_t InN, std::size_t InM, std::size_t InFilterSize, std::size_t InStride, C_MatrixLikeComponent InOperand>
+struct Conv2dLayer {
+    static constexpr std::size_t N = (InOperand::N - InFilterSize) / InStride + 1;
+    static constexpr std::size_t M = (InOperand::M - InFilterSize) / InStride + 1;
+
+    MatrixVariable<InFilterSize, InFilterSize> filter;
+
+    using Input = Matrix<InN, InM>;
+    Input cached_input;
+
+    static constexpr std::size_t FilterSize = InFilterSize;
+    static constexpr std::size_t Stride = InStride;
+
+    auto &parameters() { return std::make_tuple(std::ref(filter)); }
+
+    auto Forward(const Input& input) {
+        cached_input = input;
+        Matrix<N, M> out;
+
+        for (std::size_t i = 0; i < N; i++) {
+            for (std::size_t j = 0; j < M; j++) {
+                for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
+                    for (std::size_t v = Stride * j, f_j = 0; f_j < FilterSize; f_j++) {
+                        out.get(i, j) += filter.get(f_i, f_j) * input.get(u + f_i, v + f_j);
+                    }
+                }
+            }
+        }
+
+        return out;
+    }
+
+    auto Backward(const auto& grad) {
+        Matrix<InN, InM> res;
+
+        for (std::size_t i = 0; i < N; i++) {
+            for (std::size_t j = 0; j < M; j++) {
+                for (std::size_t u = Stride * i, f_i = 0; f_i < FilterSize; f_i++) {
+                    for (std::size_t v = Stride * j, f_j = 0; f_j < FilterSize; f_j++) {
+                        res.get(u + f_i, v + f_j) += grad.get(i, j) * filter.data.get(f_i, f_j);
+                        filter.grad.get(f_i, f_j) += grad.get(i, j) * cached_input.get(u + f_i, v + f_j);
+                    }
+                }
+            }
+        }
+
+        return res;
+    }
+};
+
+template<C_Optimizable... T>
 inline void step(double lr, T &... variables) {
     (variables.step(lr), ...);
     (variables.clear_grad(), ...);
@@ -585,50 +605,58 @@ inline void step(double lr, T &... variables) {
 template<typename T>
 using pure_t = std::remove_cvref_t<T>;
 
-template<MatrixLikeComponent LHS, MatrixLikeComponent RHS>
+template<C_MatrixLikeComponent LHS, C_MatrixLikeComponent RHS>
 inline auto operator*(const LHS &lhs, const RHS &rhs) {
     return MatMultiply<pure_t<decltype(lhs)>, pure_t<decltype(rhs)>>{lhs, rhs};
 }
 
-template<Scalar ScalarType, MatrixLikeComponent RHS>
+template<C_Scalar ScalarType, C_MatrixLikeComponent RHS>
 inline auto operator*(ScalarType scalar, const RHS &rhs) {
-    return MatScale{rhs, scalar};
+    auto op = MatScale<pure_t<pure_t<decltype(rhs)>>>{rhs};
+    op.policy.scalar = scalar;
+    return op;
 }
 
-template<Scalar ScalarType, MatrixLikeComponent LHS>
+template<C_Scalar ScalarType, C_MatrixLikeComponent LHS>
 inline auto operator*(const LHS &lhs, ScalarType scalar) {
-    return MatScale{lhs, scalar};
+    auto op = MatScale<pure_t<pure_t<decltype(lhs)>>>{lhs};
+    op.policy.scalar = scalar;
+    return op;
 }
 
-template<MatrixLikeComponent LHS, MatrixLikeComponent RHS>
-requires (IsMatrixVariable<LHS> || IsMatrixVariable<typename LHS::Whole>) &&
-         (IsMatrixVariable<RHS> || IsMatrixVariable<typename RHS::Whole>)
+// 乘以-1
+template<C_MatrixLikeComponent LHS>
+inline auto operator-(const LHS &lhs) {
+    return lhs * -1;
+}
+
+template<C_MatrixLikeComponent LHS, C_MatrixLikeComponent RHS>
+requires (C_MatrixVariable<LHS> || C_MatrixVariable<typename LHS::Whole>) &&
+         (C_MatrixVariable<RHS> || C_MatrixVariable<typename RHS::Whole>)
 inline auto operator+(const LHS &lhs, const RHS &rhs) {
     return MatAddition<pure_t<decltype(lhs)>, pure_t<decltype(rhs)>>{lhs, rhs};
 }
 
-template<Component LHS, Component RHS>
-requires (IsSingleVariable<LHS> || IsSingleVariable<typename LHS::Whole>) &&
-         (IsSingleVariable<RHS> || IsSingleVariable<typename RHS::Whole>)
+template<C_Component LHS, C_Component RHS>
+requires (C_SingleVariable<LHS> || C_SingleVariable<typename LHS::Whole>) &&
+         (C_SingleVariable<RHS> || C_SingleVariable<typename RHS::Whole>)
 inline auto operator+(const LHS &lhs, const RHS &rhs) {
     return VarAddition{lhs, rhs};
 }
 
-template<MatrixLikeComponent LHS, MatrixLikeComponent RHS>
+template<C_MatrixLikeComponent LHS, C_MatrixLikeComponent RHS>
 inline auto operator-(const LHS &lhs, const RHS &rhs) {
     return lhs + (-rhs);
 }
 
 // 用^模拟指数运算符，注意^的优先级低于+
-template<MatrixLikeComponent LHS>
+template<C_MatrixLikeComponent LHS>
 inline auto operator^(const LHS &lhs, unsigned int k) {
-    return Power{k, lhs};
+    auto op = Power<pure_t<decltype(lhs)>>{lhs};
+    op.policy.K = k;
+
+    return op;
 }
 
-// 乘以-1
-template<MatrixLikeComponent LHS>
-inline auto operator-(const LHS &lhs) {
-    return MatScale{lhs, -1};
-}
 
 #endif //METAAI_COMPONENTS_H
