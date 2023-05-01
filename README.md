@@ -25,7 +25,7 @@ sequence能够取得layer的参数，以供训练使用
 ### Variable
 - 分为SingleVariable和MatrixVariable
 
-- 前者主要基于double，后者基于自己实现了Matrix
+- 前者主要基于double，后者基于自己实现的Matrix
 
 - Variable具有data和grad两个关键的属性
   - data：Variable中保存的值
